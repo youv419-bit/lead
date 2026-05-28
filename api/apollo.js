@@ -1,0 +1,30 @@
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  const { apiKey, query, page = 1 } = req.body;
+  if (!apiKey) return res.status(400).json({ error: 'API key required' });
+
+  try {
+    const response = await fetch('https://api.apollo.io/v1/mixed_people/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        q_keywords: query.keywords || '',
+        person_titles: query.titles || ['founder', 'ceo', 'cto', 'head of ecommerce', 'marketing director', 'owner'],
+        organization_locations: query.locations || [],
+        organization_num_employees_ranges: query.employeeRanges || ['1,50', '51,200'],
+        page: page,
+        per_page: 25
+      })
+    });
+    const data = await response.json();
+    res.status(200).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}
