@@ -1332,18 +1332,155 @@ async function searchLeads() {
   document.getElementById('search-btn').disabled = true;
 
   const steps = ['step-1','step-2','step-3','step-4','step-5'];
-  const labels = ['Scanning databases...','Filtering by criteria...','Scoring leads...','Finding contacts...','Done!'];
+  const labels = ['Scanning Apollo database...','Filtering by criteria...','Scoring leads...','Finding contact emails...','Done!'];
 
-  for(let i=0; i<steps.length; i++) {
+  // Animate steps
+  for(let i=0; i<3; i++) {
     await sleep(600);
     document.getElementById(steps[i]).classList.add('active');
     document.getElementById('search-status').textContent = labels[i];
     if(i>0) document.getElementById(steps[i-1]).classList.add('done');
   }
 
-  await sleep(400);
+  const apolloKey = localStorage.getItem('lh_key_apollo');
+  const hunterKey = localStorage.getItem('lh_key_hunter');
 
-  leads = generateSampleLeads({countries, platforms, sizes, industry, keyword});
+  if(apolloKey) {
+    // ===== REAL APOLLO API CALL =====
+    try {
+      document.getElementById('search-status').textContent = 'Calling Apollo.io live database...';
+
+      const locationMap = {
+        'USA': 'United States',
+        'UK': 'United Kingdom',
+        'Australia': 'Australia',
+        'Canada': 'Canada'
+      };
+      const locations = countries.map(c => locationMap[c] || c);
+
+      const sizeMap = {
+        '1-10': '1,10',
+        '11-50': '11,50',
+        '51-200': '51,200',
+        '201-500': '201,500'
+      };
+      const employeeRanges = sizes.length ? sizes.map(s => sizeMap[s]).filter(Boolean) : ['1,10','11,50'];
+
+      // Build keyword from platform + industry
+      const platformKeyword = platforms.join(' OR ');
+      const searchKeyword = keyword || (industry ? `${industry} ${platformKeyword}` : platformKeyword);
+
+      const response = await fetch('/api/apollo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: apolloKey,
+          query: {
+            keywords: searchKeyword,
+            titles: ['founder','ceo','owner','co-founder','managing director','head of ecommerce','ecommerce manager','marketing director','director'],
+            locations: locations,
+            employeeRanges: employeeRanges
+          },
+          page: 1
+        })
+      });
+
+      const data = await response.json();
+
+      document.getElementById(steps[2]).classList.add('done');
+      document.getElementById(steps[3]).classList.add('active');
+      document.getElementById('search-status').textContent = labels[3];
+      await sleep(500);
+
+      if(data && data.people && data.people.length > 0) {
+        // Map Apollo response to our lead format
+        leads = await Promise.all(data.people.map(async (person, idx) => {
+          const org = person.organization || {};
+          const website = org.website_url ? org.website_url.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
+          const domain = website.split('/')[0];
+
+          // Detect platform from tech stack or keywords
+          let platform = 'WordPress';
+          const techStack = (org.technology_names || []).join(' ').toLowerCase();
+          const orgName = (org.name || '').toLowerCase();
+          if(techStack.includes('shopify') || orgName.includes('shopify')) platform = 'Shopify';
+          else if(techStack.includes('woocommerce')) platform = 'WooCommerce';
+          else platform = platforms[idx % platforms.length]; // fallback to selected
+
+          // Score the lead
+          let score = 50;
+          if(person.email) score += 20;
+          if(platform) score += 15;
+          if(org.estimated_num_employees && org.estimated_num_employees < 200) score += 10;
+          if(person.title && ['founder','ceo','owner','director'].some(t => person.title.toLowerCase().includes(t))) score += 10;
+          score = Math.min(score, 99);
+
+          // Try Hunter.io for email if Apollo doesn't have it
+          let email = person.email || '';
+          if(!email && hunterKey && domain) {
+            try {
+              const firstName = person.first_name || '';
+              const lastName = person.last_name || '';
+              const hunterRes = await fetch('/api/hunter', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ apiKey: hunterKey, domain, firstName, lastName })
+              });
+              const hunterData = await hunterRes.json();
+              email = hunterData?.data?.email || '';
+            } catch(e) {}
+          }
+
+          return {
+            id: person.id || Date.now() + idx,
+            company: org.name || 'Unknown Company',
+            name: `${person.first_name || ''} ${person.last_name || ''}`.trim(),
+            title: person.title || '',
+            email: email || `${(person.first_name||'contact').toLowerCase()}@${domain}`,
+            website: website || domain,
+            platform,
+            industry: org.industry || industry || 'E-commerce',
+            location: countries[0],
+            size: org.estimated_num_employees ? `${org.estimated_num_employees}` : sizes[0] || '1-50',
+            score,
+            status: 'new',
+            priority: score >= 85 ? 'hot' : score >= 70 ? 'warm' : 'cold',
+            notes: '',
+            added: new Date().toLocaleDateString(),
+            linkedin: person.linkedin_url || '',
+            phone: person.phone_numbers?.[0]?.sanitized_number || '',
+            sample: false  // ← REAL DATA, no SAMPLE tag
+          };
+        }));
+
+        // Filter only 70+ scores
+        leads = leads.filter(l => l.score >= 70).sort((a,b) => b.score - a.score);
+        showNotif(`✅ Found ${leads.length} real leads from Apollo!`, 'success');
+
+      } else {
+        // Apollo returned no results — fall back to sample
+        showNotif('⚠️ Apollo returned no results for these filters. Showing sample data.', 'info');
+        leads = generateSampleLeads({countries, platforms, sizes, industry, keyword});
+      }
+
+    } catch(err) {
+      console.error('Apollo API error:', err);
+      showNotif('⚠️ Apollo API error — showing sample data. Check your key in Settings.', 'error');
+      leads = generateSampleLeads({countries, platforms, sizes, industry, keyword});
+    }
+
+  } else {
+    // No API key — use sample data
+    await sleep(800);
+    leads = generateSampleLeads({countries, platforms, sizes, industry, keyword});
+    showNotif('ℹ️ No Apollo key found — showing sample data. Add key in Settings.', 'info');
+  }
+
+  // Final steps animation
+  document.getElementById(steps[3]).classList.add('done');
+  document.getElementById(steps[4]).classList.add('active');
+  document.getElementById('search-status').textContent = 'Done!';
+  await sleep(400);
 
   document.getElementById('search-progress').classList.remove('show');
   document.getElementById('search-btn').disabled = false;
